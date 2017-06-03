@@ -33,6 +33,7 @@
 #include <pthread.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
+#include <stdbool.h>
 #include <hardware/lights.h>
 #include <hardware/hardware.h>
 
@@ -61,57 +62,68 @@
 #define init_module(mod, len, opts) syscall(__NR_init_module, mod, len, opts)
 #define delete_module(name, flags) syscall(__NR_delete_module, name, flags)
 
+#define BACKLIGHT_PWM          "backlight_pwm"
+#define BACKLIGHT_PWM_YES          "yes"
+#define BACKLIGHT_PWM_NO           "no"
+#define BACKLIGHT_PWM_INV          "invert"
+
 static pthread_once_t g_init = PTHREAD_ONCE_INIT;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+
+char * env_backlight;
+bool invert, enable;
 
 void init_globals(void)
 {
     LOGD( "in: %s", __FUNCTION__ );
-
+    
     // init the mutex
     pthread_mutex_init(&g_lock, NULL);
-
-//load pwm-meson kernel module
-    int fd = open("/system/lib/modules/pwm-meson.ko", O_RDONLY);
-    struct stat st;
-    fstat(fd, &st);
-    size_t image_size = st.st_size;
-    void *image = malloc(image_size);
-    read(fd, image, image_size);
-    close(fd);
-    if (init_module(image, image_size, "") != 0) {
-        LOGE( "error loading pwm-meson.ko");
-        return;
-    }
-    free(image);
-
-//load pwm-ctrl kernel module
-    fd = open("/system/lib/modules/pwm-ctrl.ko", O_RDONLY);
-    fstat(fd, &st);
-    image_size = st.st_size;
-    image = malloc(image_size);
-    read(fd, image, image_size);
-    close(fd);
-    if (init_module(image, image_size, "") != 0) {
-        LOGE( "error loading pwm-ctrl.ko");
-        return;
-    }
-    free(image);
     
-    char value[20];
-    int nwr, ret;
-    fd = open(BACKLIGHT_FREQ, O_RDWR);
-    if (fd > 0) {
-        nwr = sprintf(value, "%d\n", 1000);
-        ret = write(fd, value, nwr);
+    if (enable) {
+        
+        //pwm-meson
+        int fd = open("/system/lib/modules/pwm-meson.ko", O_RDONLY);
+        struct stat st;
+        fstat(fd, &st);
+        size_t image_size = st.st_size;
+        void *image = malloc(image_size);
+        read(fd, image, image_size);
         close(fd);
-    }
-
-    fd = open(BACKLIGHT_EN, O_RDWR);
-    if (fd > 0) {
-        nwr = sprintf(value, "%d\n", 1);
-        ret = write(fd, value, nwr);
+        if (init_module(image, image_size, "") != 0) {
+            LOGE( "error loading pwm-meson.ko");
+            return;
+        }
+        free(image);
+        
+        //pwm-ctrl
+        fd = open("/system/lib/modules/pwm-ctrl.ko", O_RDONLY);
+        fstat(fd, &st);
+        image_size = st.st_size;
+        image = malloc(image_size);
+        read(fd, image, image_size);
         close(fd);
+        if (init_module(image, image_size, "") != 0) {
+            LOGE( "error loading pwm-ctrl.ko");
+            return;
+        }
+        free(image);
+        
+        char value[20];
+        int nwr, ret;
+        fd = open(BACKLIGHT_FREQ, O_RDWR);
+        if (fd > 0) {
+            nwr = sprintf(value, "%d\n", 1000);
+            ret = write(fd, value, nwr);
+            close(fd);
+        }
+        
+        fd = open(BACKLIGHT_EN, O_RDWR);
+        if (fd > 0) {
+            nwr = sprintf(value, "%d\n", 1);
+            ret = write(fd, value, nwr);
+            close(fd);
+        }
     }
     LOGD( "leaving  %s", __FUNCTION__ );
 }
@@ -135,6 +147,8 @@ set_light_backlight( struct light_device_t* dev, struct light_state_t const* sta
     light_level = state->color&0xff;
     light_level = light_level << 2;
     if (light_level > 0) light_level += 3;
+    if (invert) light_level = 1023 - light_level;
+    
     LOGD( "level: %d", light_level);
     
     fd = open(BACKLIGHT, O_RDWR);
@@ -221,6 +235,44 @@ open_lights( const struct hw_module_t* module, char const *name,
 
     if (0 == strcmp( LIGHT_ID_BACKLIGHT, name )) {
         set_light = set_light_backlight;
+        
+        //check the bootargs for backlight_pwm
+        FILE * fp;  
+        char * line = NULL; 
+        char * list;
+        char * value;
+        size_t len = 0;
+        
+        fp = fopen("/proc/cmdline", "r");                                                                                                                         
+        if (fp != NULL) {
+            getline(&line, &len, fp);
+            list = strtok (line, " ");
+            while (list != NULL)
+            {
+                LOGD ("%s\n",list);
+                if (0 == strncmp(BACKLIGHT_PWM, list, 13)) {
+                    env_backlight = strtok(list, "="); 
+                    env_backlight = strtok(NULL, "=");
+                    break;
+                }
+                list = strtok (NULL, " ");
+            }
+        }
+        enable = false;
+        invert = false;
+        if (env_backlight != NULL) {
+            LOGD("backlight_pwm : %s", env_backlight);
+            
+            if (0 == strncmp( BACKLIGHT_PWM_YES, env_backlight, 3 )) {
+                enable = true;
+            } else if (0 == strncmp( BACKLIGHT_PWM_NO, env_backlight, 2 )) {
+                //enable = false;
+                //return -EINVAL;
+            } else if (0 == strncmp( BACKLIGHT_PWM_INV, env_backlight, 6 )) {
+                enable = true;
+                invert = true;
+            } else { enable = false; }
+        }
     } else if (0 == strcmp( LIGHT_ID_KEYBOARD, name )) {
         set_light = set_light_keyboard;
     } else if (0 == strcmp( LIGHT_ID_BUTTONS, name )) {
